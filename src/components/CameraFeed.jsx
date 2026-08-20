@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+import classifyLetter from '../classifyLetter';
 
 // MediaPipe standard hand skeleton connections
 const HAND_CONNECTIONS = [
@@ -11,7 +12,7 @@ const HAND_CONNECTIONS = [
   [5, 9], [9, 13], [13, 17],            // palm
 ];
 
-export default function CameraFeed({ onHandLandmarks }) {
+export default function CameraFeed({ onHandLandmarks, onLetterDetected }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const handLandmarkerRef = useRef(null);
@@ -93,16 +94,19 @@ export default function CameraFeed({ onHandLandmarks }) {
     if (results.landmarks && results.landmarks.length > 0) {
       drawLandmarks(canvas, results.landmarks);
       if (onHandLandmarks) onHandLandmarks(results.landmarks);
+      const letter = classifyLetter(results.landmarks[0]);
+      if (onLetterDetected) onLetterDetected(letter);
     } else {
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       if (onHandLandmarks) onHandLandmarks(null);
+      if (onLetterDetected) onLetterDetected(null);
     }
 
     animFrameRef.current = requestAnimationFrame(() =>
       detect(video, canvas, handLandmarker)
     );
-  }, [drawLandmarks, onHandLandmarks]);
+  }, [drawLandmarks, onHandLandmarks, onLetterDetected]);
 
   useEffect(() => {
     let stream = null;

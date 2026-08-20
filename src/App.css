@@ -172,17 +172,44 @@
   flex-shrink: 0;
 }
 
-.output-placeholder {
+.letter-display {
   padding: 32px 24px;
   border-radius: 12px;
-  border: 2px dashed var(--border);
+  border: 2px solid var(--border);
   text-align: center;
-  color: var(--text);
-  font-size: 14px;
+  background: rgba(255, 255, 255, 0.02);
 }
 
-.output-placeholder p {
-  margin: 0;
+.letter-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--text);
+  margin: 0 0 16px;
+}
+
+.letter-current {
+  font-size: 96px;
+  font-weight: 700;
+  color: #333;
+  line-height: 1.1;
+  min-height: 110px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, text-shadow 0.15s;
+  font-family: var(--mono);
+}
+
+.letter-current.active {
+  color: var(--accent);
+  text-shadow: 0 0 24px rgba(0, 255, 170, 0.4);
+}
+
+.letter-hint {
+  font-size: 13px;
+  color: var(--text);
+  margin: 16px 0 0;
 }
 
 /* ─── Footer ─── */
