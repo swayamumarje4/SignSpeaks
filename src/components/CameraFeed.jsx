@@ -2,6 +2,9 @@ import { useRef, useEffect, useState, useCallback } from 'react';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import classifyLetter from '../classifyLetter';
 
+// Abort controller pattern: each init increments a counter;
+// stale inits detect they are obsolete and bail out.
+
 // MediaPipe standard hand skeleton connections
 const HAND_CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4],       // thumb
@@ -17,9 +20,11 @@ export default function CameraFeed({ onHandLandmarks, onLetterDetected }) {
   const canvasRef = useRef(null);
   const handLandmarkerRef = useRef(null);
   const animFrameRef = useRef(null);
+  const initCountRef = useRef(0);
   const [cameraError, setCameraError] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadingMessage, setLoadingMessage] = useState('Starting camera...');
+  const [retryCount, setRetryCount] = useState(0);
 
   // Mirror a landmark x-coordinate: mirrored_x = 1 - x
   const mirrorX = (x) => 1 - x;
@@ -74,7 +79,14 @@ export default function CameraFeed({ onHandLandmarks, onLetterDetected }) {
     }
   }, []);
 
-  // Detection loop
+  // Use refs for callbacks so the detect loop and effect don't re-create
+  // every render (which would kill the camera stream).
+  const onHandLandmarksRef = useRef(onHandLandmarks);
+  onHandLandmarksRef.current = onHandLandmarks;
+  const onLetterDetectedRef = useRef(onLetterDetected);
+  onLetterDetectedRef.current = onLetterDetected;
+
+  // Detection loop — depends only on drawLandmarks (stable) via refs for callbacks.
   const detect = useCallback((video, canvas, handLandmarker) => {
     if (!video || video.readyState < 2) {
       animFrameRef.current = requestAnimationFrame(() =>
@@ -93,42 +105,54 @@ export default function CameraFeed({ onHandLandmarks, onLetterDetected }) {
 
     if (results.landmarks && results.landmarks.length > 0) {
       drawLandmarks(canvas, results.landmarks);
-      if (onHandLandmarks) onHandLandmarks(results.landmarks);
+      if (onHandLandmarksRef.current) onHandLandmarksRef.current(results.landmarks);
       const letter = classifyLetter(results.landmarks[0]);
-      if (onLetterDetected) onLetterDetected(letter);
+      if (onLetterDetectedRef.current) onLetterDetectedRef.current(letter);
     } else {
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      if (onHandLandmarks) onHandLandmarks(null);
-      if (onLetterDetected) onLetterDetected(null);
+      if (onHandLandmarksRef.current) onHandLandmarksRef.current(null);
+      if (onLetterDetectedRef.current) onLetterDetectedRef.current(null);
     }
 
     animFrameRef.current = requestAnimationFrame(() =>
       detect(video, canvas, handLandmarker)
     );
-  }, [drawLandmarks, onHandLandmarks, onLetterDetected]);
+  }, [drawLandmarks]);
 
   useEffect(() => {
     let stream = null;
+    let initId = ++initCountRef.current; // unique ID for this mount
+    let cancelled = false;
 
     const init = async () => {
       try {
         setLoadingMessage('Starting camera...');
-        // Request webcam access
         stream = await navigator.mediaDevices.getUserMedia({
           video: { width: { ideal: 1280 }, height: { ideal: 720 } },
         });
 
+        // A newer init has started — bail out silently
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          await videoRef.current.play();
+          // Suppress interrupted-play error from StrictMode unmount/remount
+          videoRef.current.play().catch(() => {});
         }
 
         setLoadingMessage('Loading hand detection model...');
-        // Load MediaPipe
         const vision = await FilesetResolver.forVisionTasks(
           'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
         );
+
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
 
         const handLandmarker = await HandLandmarker.createFromOptions(vision, {
           baseOptions: {
@@ -140,17 +164,29 @@ export default function CameraFeed({ onHandLandmarks, onLetterDetected }) {
           numHands: 1,
         });
 
+        if (cancelled) {
+          handLandmarker.close();
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+
         handLandmarkerRef.current = handLandmarker;
         setIsLoading(false);
-
-        // Start detection loop
         detect(videoRef.current, canvasRef.current, handLandmarker);
       } catch (err) {
+        if (cancelled) return;
         console.error('Init error:', err);
         if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
           setCameraError('Camera access needed — please allow permission and refresh.');
+        } else if (
+          err.name === 'NotReadableError' ||
+          (err.message && err.message.toLowerCase().includes('device in use'))
+        ) {
+          setCameraError(
+            'Camera is in use by another app.\nClose other apps using the camera (Zoom, Teams, VS Code preview, etc.) and refresh.'
+          );
         } else {
-          setCameraError(`Error: ${err.message}`);
+          setCameraError(`Camera error: ${err.message}`);
         }
         setIsLoading(false);
       }
@@ -159,17 +195,31 @@ export default function CameraFeed({ onHandLandmarks, onLetterDetected }) {
     init();
 
     return () => {
+      cancelled = true;
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-      if (handLandmarkerRef.current) handLandmarkerRef.current.close();
+      if (handLandmarkerRef.current) {
+        handLandmarkerRef.current.close();
+        handLandmarkerRef.current = null;
+      }
       if (stream) stream.getTracks().forEach((t) => t.stop());
     };
-  }, [detect]);
+  }, [detect, retryCount]);
+
+  const handleRetry = useCallback(() => {
+    setCameraError(null);
+    setIsLoading(true);
+    setLoadingMessage('Starting camera...');
+    setRetryCount((c) => c + 1);
+  }, []);
 
   if (cameraError) {
     return (
       <div className="camera-error">
         <div className="error-icon">📷</div>
-        <p>{cameraError}</p>
+        <p style={{ whiteSpace: 'pre-line' }}>{cameraError}</p>
+        <button className="btn btn-retry" onClick={handleRetry}>
+          Try Again
+        </button>
       </div>
     );
   }
